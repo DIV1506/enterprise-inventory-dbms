@@ -1,0 +1,268 @@
+psql -X -v ON_ERROR_STOP=1 -q -f sql/01_schema.sql
+psql:sql/01_schema.sql:7: NOTICE:  schema "inventory" does not exist, skipping
+psql -X -v ON_ERROR_STOP=1 -q -f sql/02_seed_data.sql > /dev/null
+Database 'inventory_db' ready.
+psql -X -v ON_ERROR_STOP=1 -f sql/06_tests.sql
+SET
+SET
+=== Data-integrity tests ===
+psql:sql/06_tests.sql:59: NOTICE:  PASS [1]: stock table reconciles with the transaction ledger
+psql:sql/06_tests.sql:59: NOTICE:  PASS [2]: no negative stock
+psql:sql/06_tests.sql:59: NOTICE:  PASS [3]: every received PO item has a matching IN transaction
+psql:sql/06_tests.sql:59: NOTICE:  PASS [4]: only RECEIVED purchase orders post stock
+psql:sql/06_tests.sql:59: NOTICE:  PASS [5]: PO items match the supplier catalogue
+psql:sql/06_tests.sql:59: NOTICE:  PASS [6]: no warehouse exceeds its capacity
+DO
+=== Constraint tests (each bad statement MUST be rejected) ===
+psql:sql/06_tests.sql:107: NOTICE:  PASS [7]: CHECK rejects negative stock
+psql:sql/06_tests.sql:107: NOTICE:  PASS [8]: UNIQUE rejects duplicate SKU
+psql:sql/06_tests.sql:107: NOTICE:  PASS [9]: FOREIGN KEY rejects orphan PO item
+psql:sql/06_tests.sql:107: NOTICE:  PASS [10]: CHECK rejects expected_date < order_date
+psql:sql/06_tests.sql:107: NOTICE:  PASS [11]: CHECK ties status RECEIVED to received_date
+psql:sql/06_tests.sql:107: NOTICE:  PASS [12]: CHECK limits supplier rating to 0-5
+psql:sql/06_tests.sql:107: NOTICE:  PASS [13]: issue_stock() is atomic (overdraw rejected, no partial write)
+DO
+=== ALL TESTS PASSED ===
+psql -X -v ON_ERROR_STOP=1 -f sql/03_queries.sql
+SET
+=== Q1. Reorder report: items below reorder level per warehouse, with best supplier ===
+     warehouse     |   sku    |       category        | on_hand | reorder_level | suggested_order_qty |  cheapest_supplier  | unit_cost | lead_time_days 
+-------------------+----------+-----------------------+---------+---------------+---------------------+---------------------+-----------+----------------
+ Central Warehouse | SKU-0009 | Safety Equipment      |       3 |            73 |                 143 | Fortune Packaging   |    880.97 |             14
+ Central Warehouse | SKU-0041 | Packaging             |       6 |            58 |                 110 | Coastal Traders     |   3133.38 |              8
+ East Depot        | SKU-0012 | Office Supplies       |       1 |            48 |                  95 | Fortune Packaging   |   1467.46 |             14
+ Central Warehouse | SKU-0017 | Packaging             |       1 |            44 |                  87 | BlueLine Components |    846.75 |              7
+ Central Warehouse | SKU-0033 | Safety Equipment      |       3 |            42 |                  81 | Coastal Traders     |     94.39 |              9
+ Central Warehouse | SKU-0003 | Safety Equipment      |       4 |            33 |                  62 | Coastal Traders     |    302.04 |              9
+ Central Warehouse | SKU-0025 | Electrical Components |       6 |            32 |                  58 | BlueLine Components |   1119.19 |              8
+(7 rows)
+
+=== Q2. Supplier performance: on-time delivery rate & average delay ===
+        supplier        | received_orders | on_time_pct | avg_days_late | total_spend 
+------------------------+-----------------+-------------+---------------+-------------
+ Gamma Tools Ltd        |             107 |        69.2 |          1.33 | 19890029.34
+ Horizon Office Mart    |             107 |        68.2 |          1.39 | 17237212.85
+ Eastern Safety Co      |              76 |        65.8 |          1.68 | 11594798.67
+ BlueLine Components    |              65 |        60.0 |          2.15 | 12802674.51
+ Delta Mechanicals      |              58 |        58.6 |          1.48 | 11906157.22
+ Coastal Traders        |              72 |        55.6 |          1.67 | 14301433.49
+ Apex Industrial Supply |              88 |        52.3 |          1.70 | 19101145.59
+ Fortune Packaging      |              64 |        51.6 |          2.13 | 12545359.43
+(8 rows)
+
+=== Q3. Monthly stock movement (IN vs OUT) ===
+  month  | units_in | units_out | net_change 
+---------+----------+-----------+------------
+ 2025-01 |     2769 |      1104 |       1665
+ 2025-02 |     5745 |      1408 |       4337
+ 2025-03 |     3709 |      1425 |       2284
+ 2025-04 |     8346 |      1324 |       7022
+ 2025-05 |     5729 |      1650 |       4079
+ 2025-06 |     4033 |      1571 |       2462
+ 2025-07 |     7785 |      1396 |       6389
+ 2025-08 |     4711 |      1292 |       3419
+ 2025-09 |     7733 |      1272 |       6461
+ 2025-10 |     8648 |      1521 |       7127
+ 2025-11 |     9380 |      1454 |       7926
+ 2025-12 |     3235 |      3130 |        105
+(12 rows)
+
+=== Q4. Inventory value by category (stock x unit price) ===
+       category        | units | inventory_value 
+-----------------------+-------+-----------------
+ Electrical Components | 13928 |     51606179.20
+ Mechanical Parts      | 13756 |     36930375.10
+ Office Supplies       | 14406 |     33539501.37
+ Packaging             | 12733 |     32049270.36
+ Tools                 | 13097 |     25357609.60
+ Safety Equipment      | 14305 |     21132134.82
+(6 rows)
+
+=== Q5. Full transaction history of one product (running balance via window fn) ===
+    date    | txn_type | quantity | running_balance 
+------------+----------+----------+-----------------
+ 2025-01-01 | ADJUST   |      179 |             179
+ 2025-01-20 | OUT      |      -13 |             166
+ 2025-01-23 | OUT      |      -13 |             153
+ 2025-03-04 | OUT      |      -15 |             138
+ 2025-03-17 | OUT      |       -7 |             131
+ 2025-03-26 | OUT      |       -9 |             122
+ 2025-04-07 | OUT      |       -3 |             119
+ 2025-05-02 | OUT      |       -5 |             114
+ 2025-05-04 | OUT      |      -11 |             103
+ 2025-05-25 | OUT      |       -6 |              97
+ 2025-09-13 | OUT      |       -5 |              92
+ 2025-10-13 | OUT      |       -4 |              88
+(12 rows)
+
+=== Q6. Inventory turnover: units issued vs current stock (top 5 fastest movers) ===
+   sku    |    name    | units_out | on_hand | turnover_ratio | turnover_rank 
+----------+------------+-----------+---------+----------------+---------------
+ SKU-0025 | Product 25 |      1038 |     565 |          1.837 |             1
+ SKU-0041 | Product 41 |      1006 |    1281 |          0.785 |             2
+ SKU-0009 | Product 9  |       763 |    1341 |          0.569 |             3
+ SKU-0017 | Product 17 |       649 |    1281 |          0.507 |             4
+ SKU-0033 | Product 33 |       538 |    1132 |          0.475 |             5
+(5 rows)
+
+=== Q7. Cheapest supplier per product (subquery / DISTINCT ON) ===
+   sku    |   cheapest_supplier    | unit_cost | lead_time_days 
+----------+------------------------+-----------+----------------
+ SKU-0001 | Apex Industrial Supply |   2586.49 |             13
+ SKU-0002 | Gamma Tools Ltd        |   2815.10 |              4
+ SKU-0003 | Coastal Traders        |    302.04 |              9
+ SKU-0004 | Coastal Traders        |   1923.78 |             11
+ SKU-0005 | Horizon Office Mart    |   1886.71 |             14
+ SKU-0006 | Coastal Traders        |   2197.24 |              9
+ SKU-0007 | Gamma Tools Ltd        |   2998.88 |              3
+ SKU-0008 | Eastern Safety Co      |    459.71 |             12
+ SKU-0009 | Fortune Packaging      |    880.97 |             14
+ SKU-0010 | Apex Industrial Supply |    314.95 |             10
+(10 rows)
+
+=== Q8. Ledger reconciliation: stock table vs sum of transactions (expect 0 rows) ===
+ product_id | warehouse_id | stock_qty | ledger_qty 
+------------+--------------+-----------+------------
+(0 rows)
+
+psql -X -v ON_ERROR_STOP=1 -f sql/04_indexing_demo.sql
+SET
+INSERT 0 250000
+ANALYZE
+=== WITHOUT index: filter by product + date range ===
+DROP INDEX
+DROP INDEX
+                                                                                  QUERY PLAN                                                                                  
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Gather (actual rows=242 loops=1)
+   Workers Planned: 1
+   Workers Launched: 1
+   Buffers: shared hit=2870
+   ->  Parallel Seq Scan on stock_transactions (actual rows=121 loops=2)
+         Filter: ((txn_time >= '2025-03-01 00:00:00'::timestamp without time zone) AND (txn_time <= '2025-03-31 00:00:00'::timestamp without time zone) AND (product_id = 7))
+         Rows Removed by Filter: 126280
+         Buffers: shared hit=2870
+ Planning:
+   Buffers: shared hit=55
+ Planning Time: 0.140 ms
+ Execution Time: 11.689 ms
+(12 rows)
+
+=== WITH composite index (product_id, txn_time) ===
+CREATE INDEX
+CREATE INDEX
+ANALYZE
+                                                                                    QUERY PLAN                                                                                    
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Bitmap Heap Scan on stock_transactions (actual rows=242 loops=1)
+   Recheck Cond: ((product_id = 7) AND (txn_time >= '2025-03-01 00:00:00'::timestamp without time zone) AND (txn_time <= '2025-03-31 00:00:00'::timestamp without time zone))
+   Heap Blocks: exact=229
+   Buffers: shared hit=229 read=4
+   ->  Bitmap Index Scan on idx_txn_product_time (actual rows=242 loops=1)
+         Index Cond: ((product_id = 7) AND (txn_time >= '2025-03-01 00:00:00'::timestamp without time zone) AND (txn_time <= '2025-03-31 00:00:00'::timestamp without time zone))
+         Buffers: shared read=4
+ Planning:
+   Buffers: shared hit=26 read=2
+ Planning Time: 0.125 ms
+ Execution Time: 0.227 ms
+(11 rows)
+
+DELETE 250000
+psql -X -v ON_ERROR_STOP=1 -f sql/05_transactions_acid.sql
+SET
+=== A: Atomicity - transfer stock between warehouses, fail midway, everything rolls back ===
+ warehouse_id | quantity 
+--------------+----------
+            1 |     1036
+            2 |      868
+            3 |      455
+(3 rows)
+
+(the next statement is EXPECTED to fail - that is the point of the demo)
+BEGIN
+UPDATE 1
+UPDATE 1
+psql:sql/05_transactions_acid.sql:17: ERROR:  new row for relation "stock" violates check constraint "stock_quantity_check"
+DETAIL:  Failing row contains (1, 3, -1, 2025-12-01 12:12:15.115116).
+ROLLBACK
+--- after rollback, balances unchanged:
+ warehouse_id | quantity 
+--------------+----------
+            1 |     1036
+            2 |      868
+            3 |      455
+(3 rows)
+
+=== C: Consistency - constraint violations are rejected ===
+psql:sql/05_transactions_acid.sql:42: NOTICE:  Rejected negative stock: new row for relation "stock" violates check constraint "stock_quantity_check"
+psql:sql/05_transactions_acid.sql:42: NOTICE:  Rejected duplicate SKU: duplicate key value violates unique constraint "products_sku_key"
+psql:sql/05_transactions_acid.sql:42: NOTICE:  Rejected orphan PO item: insert or update on table "po_items" violates foreign key constraint "po_items_po_id_fkey"
+DO
+=== Savepoint: keep the first change, undo only the second ===
+BEGIN
+CALL
+SAVEPOINT
+CALL
+ROLLBACK
+COMMIT
+ txn_type | quantity |        note        
+----------+----------+--------------------
+ OUT      |       -5 | first issue (kept)
+(1 row)
+
+ synchronous_commit 
+--------------------
+ on
+(1 row)
+
+=== Reconciliation after demos (expect 0 rows) ===
+ product_id | warehouse_id | quantity | ledger 
+------------+--------------+----------+--------
+(0 rows)
+
+./scripts/concurrency_demo.sh
+##### Demo 1: LOST UPDATE prevented by row locking (SELECT ... FOR UPDATE) #####
+start qty = 100.  Session A issues 30 (holds the lock 3s); Session B issues 20 one second later.
+Session B waited ~2s for Session A's lock.
+final qty = 50   (expected 50 -> no lost update)
+
+##### Demo 2: ISOLATION LEVELS - non-repeatable read #####
+  READ COMMITTED  first read : 100
+  READ COMMITTED  second read: 40
+  REPEATABLE READ  first read : 100
+  REPEATABLE READ  second read: 100
+(READ COMMITTED sees the other session's committed change; REPEATABLE READ keeps its snapshot.)
+
+##### Demo 3: DEADLOCK - two sessions lock the same two rows in OPPOSITE order #####
+  [session 1] ERROR:  deadlock detected
+  [session 1] DETAIL:  Process 381 waits for ShareLock on transaction 1482; blocked by process 384.
+  [session 1] Process 384 waits for ShareLock on transaction 1481; blocked by process 381.
+  [session 1] HINT:  See server log for query details.
+  [session 1] CONTEXT:  while updating tuple (0,149) in relation "stock"
+-> PostgreSQL's deadlock detector aborted ONE session (error above); the other committed.
+
+##### Demo 4: THE FIX - always lock rows in the same order => no deadlock #####
+-> both sessions committed, no errors. Final quantities (expected 98 and 98): 98, 98
+
+(demo rows restored from the ledger)
+psql -X -v ON_ERROR_STOP=1 -f sql/06_tests.sql
+SET
+SET
+=== Data-integrity tests ===
+psql:sql/06_tests.sql:59: NOTICE:  PASS [1]: stock table reconciles with the transaction ledger
+psql:sql/06_tests.sql:59: NOTICE:  PASS [2]: no negative stock
+psql:sql/06_tests.sql:59: NOTICE:  PASS [3]: every received PO item has a matching IN transaction
+psql:sql/06_tests.sql:59: NOTICE:  PASS [4]: only RECEIVED purchase orders post stock
+psql:sql/06_tests.sql:59: NOTICE:  PASS [5]: PO items match the supplier catalogue
+psql:sql/06_tests.sql:59: NOTICE:  PASS [6]: no warehouse exceeds its capacity
+DO
+=== Constraint tests (each bad statement MUST be rejected) ===
+psql:sql/06_tests.sql:107: NOTICE:  PASS [7]: CHECK rejects negative stock
+psql:sql/06_tests.sql:107: NOTICE:  PASS [8]: UNIQUE rejects duplicate SKU
+psql:sql/06_tests.sql:107: NOTICE:  PASS [9]: FOREIGN KEY rejects orphan PO item
+psql:sql/06_tests.sql:107: NOTICE:  PASS [10]: CHECK rejects expected_date < order_date
+psql:sql/06_tests.sql:107: NOTICE:  PASS [11]: CHECK ties status RECEIVED to received_date
+psql:sql/06_tests.sql:107: NOTICE:  PASS [12]: CHECK limits supplier rating to 0-5
+psql:sql/06_tests.sql:107: NOTICE:  PASS [13]: issue_stock() is atomic (overdraw rejected, no partial write)
+DO
+=== ALL TESTS PASSED ===
